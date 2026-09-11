@@ -3,7 +3,7 @@
 # credentials in config.toml; do not commit your local config.toml.
 
 # =============================================================================
-# API Service / API 服务
+# API Service
 # =============================================================================
 # Log level: DEBUG, INFO, WARNING, or ERROR.
 log_level = "DEBUG"
@@ -17,20 +17,21 @@ listen_port = 8080
 # Leave empty for local backward-compatible access. When configured, clients
 # must send the same value in the x-api-key request header. Keep real keys only
 # in config.toml and never commit them.
-# API 路由和 /tasks 生成文件的可选保护。留空时保持本地免认证行为；
-# 配置后客户端必须通过 x-api-key 请求头传入同一个值。
+# Optional protection for API routes and generated files under /tasks.
+# Leave empty for local backward-compatible access. When configured, clients
+# must send the same value in the x-api-key request header.
 # Task artifact requests also require this header; a browser address bar cannot
 # attach custom headers, so authenticated clients should download them via HTTP.
-# 任务产物下载同样需要该请求头；浏览器地址栏无法附加自定义请求头，启用鉴权后
-# 应由 API 客户端携带请求头下载。
+# Task artifact downloads also require this header. A browser address bar cannot
+# attach custom headers, so authenticated clients should download them via HTTP.
 api_key = ""
 
 # -----------------------------------------------------------------------------
-# General / 通用设置
+# General settings
 # -----------------------------------------------------------------------------
 
 # Hide the basic configuration panel in the WebUI.
-# 是否隐藏 WebUI 基础配置面板。
+# Whether to hide the basic configuration panel in the WebUI.
 hide_config = false
 
 # Script generation backend. "local" keeps the existing LLM workflow.
@@ -51,15 +52,17 @@ loomloom_run_timeout_seconds = 600
 loomloom_video_run_timeout_seconds = 1800
 
 # Timeout in seconds for a single Edge TTS streaming request.
-# 单次 Edge TTS 流式请求超时时间。慢网络可适当调大，设置为 0 表示禁用超时。
+# Timeout in seconds for one Edge TTS streaming request. Increase for slow
+# networks; use 0 to disable the timeout.
 edge_tts_timeout = 30
 
 # Verify TLS certificates for external APIs and material downloads.
-# 默认应保持开启；仅在可信代理或自签名证书环境中临时关闭。
+# Keep this enabled by default. Disable only temporarily for a trusted proxy or
+# self-signed certificate environment.
 tls_verify = true
 
 # -----------------------------------------------------------------------------
-# Video Materials / 视频素材
+# Video materials
 # -----------------------------------------------------------------------------
 
 # Available values: "pexels", "pixabay", "coverr", "wavespeed",
@@ -79,7 +82,7 @@ video_source = "pexels"
 
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
-# Key 必须使用英文半角双引号，多个 Key 使用英文逗号分隔。
+# Use straight ASCII double quotes and separate multiple keys with commas.
 
 # Register at https://www.pexels.com/api/
 pexels_api_keys = []
