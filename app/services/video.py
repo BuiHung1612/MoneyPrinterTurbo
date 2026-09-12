@@ -1498,18 +1498,34 @@ def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
     """
     clip = ImageClip(image_path).with_duration(clip_duration).with_position("center")
     try:
-        # Apply a zoom effect using the resize method.
-        # A lambda function is used to make the zoom effect dynamic over time.
-        # The zoom effect starts from the original size and gradually scales up to 120%.
-        # t represents the current time, and clip.duration is the total duration of the clip.
-        # Note: 1 represents 100% size, so 1.2 represents 120%.
-        zoom_clip = clip.resized(
-            lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration)
-        )
+        # Dynamic Cinematic Anime Motion:
+        # 0: Dramatic Zoom-In (Focus on character / action)
+        # 1: Panoramic Zoom-Out (Revealing environment)
+        # 2: Horizontal Pan Sweep (Left to right across anime scenery)
+        # 3: Vertical Reveal Tilt (Top to bottom over character/weapon)
+        mode = abs(hash(os.path.basename(image_path))) % 4
+        dur = max(float(clip.duration or clip_duration), 0.1)
 
-        # Optionally, create a composite video clip containing the zoomed clip.
-        # This is useful if you want to add other elements to the video.
-        final_clip = CompositeVideoClip([zoom_clip])
+        w, h = clip.size if hasattr(clip, "size") and clip.size else (1080, 1920)
+
+        if mode == 0:
+            scale_fn = lambda t: 1.0 + 0.16 * (t / dur)
+            zoom_clip = clip.resized(scale_fn).with_position("center")
+        elif mode == 1:
+            scale_fn = lambda t: 1.16 - 0.14 * (t / dur)
+            zoom_clip = clip.resized(scale_fn).with_position("center")
+        elif mode == 2:
+            scale_fn = lambda t: 1.14
+            shift_range = max(int(w * 0.06), 20)
+            pos_fn = lambda t: (int(-shift_range + (2 * shift_range) * (t / dur)), "center")
+            zoom_clip = clip.resized(scale_fn).with_position(pos_fn)
+        else:
+            scale_fn = lambda t: 1.14
+            shift_range = max(int(h * 0.06), 30)
+            pos_fn = lambda t: ("center", int(-shift_range + (2 * shift_range) * (t / dur)))
+            zoom_clip = clip.resized(scale_fn).with_position(pos_fn)
+
+        final_clip = CompositeVideoClip([zoom_clip], size=clip.size)
         try:
             # Output the video to a file.
             video_file = f"{image_path}.mp4"

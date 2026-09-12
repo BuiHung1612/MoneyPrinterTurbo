@@ -209,6 +209,41 @@ class TestVideoControllerTasks(unittest.TestCase):
         )
         get_all.assert_called_once_with(2, 10)
 
+    def test_get_all_tasks_converts_file_paths_to_uris(self):
+        """任务列表返回时，必须将 videos、audio_file 等本地路径安全转为 /tasks/... 格式。"""
+        task_id = "test-all-tasks-uri"
+        task_dir = utils.task_dir(task_id)
+        video_path = os.path.join(task_dir, "final-1.mp4")
+        audio_path = os.path.join(task_dir, "audio.mp3")
+        Path(video_path).write_bytes(b"fake-video")
+        Path(audio_path).write_bytes(b"fake-audio")
+
+        try:
+            fake_tasks = [
+                {
+                    "task_id": task_id,
+                    "videos": [video_path],
+                    "audio_file": audio_path,
+                    "cross_post_owner": "internal",
+                }
+            ]
+            with patch.object(
+                video_controller.sm.state,
+                "get_all_tasks",
+                return_value=(fake_tasks, 1),
+            ):
+                with patch.dict(config.app, {"endpoint": ""}):
+                    response = video_controller.get_all_tasks(
+                        self._request(), page=1, page_size=10
+                    )
+
+            task_data = response["data"]["tasks"][0]
+            self.assertEqual(task_data["videos"], [f"/tasks/{task_id}/final-1.mp4"])
+            self.assertEqual(task_data["audio_file"], f"/tasks/{task_id}/audio.mp3")
+            self.assertNotIn("cross_post_owner", task_data)
+        finally:
+            shutil.rmtree(task_dir, ignore_errors=True)
+
     def test_task_query_returns_relative_url_without_mutating_state(self):
         """
         endpoint 未配置时应返回相对任务 URL，且不能把展示用 URL 回写到状态，

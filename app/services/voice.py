@@ -347,8 +347,27 @@ def parse_voice_name(name: str):
     # zh-CN-XiaoyiNeural-Female
     # zh-CN-YunxiNeural-Male
     # zh-CN-XiaoxiaoMultilingualNeural-V2-Female
+    if not name:
+        return ""
     name = name.replace("-Female", "").replace("-Male", "").strip()
     return name
+
+
+def get_default_voice_for_language(language: str = "") -> str:
+    lang = (language or "").lower().strip()
+    if lang.startswith("vi"):
+        return "vi-VN-HoaiMyNeural"
+    if lang.startswith("en"):
+        return "en-US-JennyNeural"
+    if lang.startswith("zh"):
+        return "zh-CN-XiaoxiaoNeural"
+    try:
+        ui_voice = config.ui.get("voice_name", "").strip() if hasattr(config, "ui") else ""
+        if ui_voice:
+            return parse_voice_name(ui_voice)
+    except Exception:
+        pass
+    return "vi-VN-HoaiMyNeural"
 
 
 def is_azure_v2_voice(voice_name: str):
@@ -579,6 +598,10 @@ def _single_tts(
             text=text,
             audio_duration_seconds=duration_seconds,
         )
+
+    if not voice_name or not voice_name.strip():
+        voice_name = get_default_voice_for_language()
+        logger.warning(f"voice_name was empty in _single_tts, fallback to {voice_name}")
 
     if is_azure_v2_voice(voice_name):
         return azure_tts_v2(
@@ -946,6 +969,10 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    if not is_no_voice(voice_name) and (not voice_name or not str(voice_name).strip()):
+        voice_name = get_default_voice_for_language()
+        logger.warning(f"voice_name was empty in tts(), defaulting to {voice_name}")
+
     # 无停顿标签时，原样直通原始文本，避免无意义的正则处理或空白截断
     if not utils.has_pause_tags(text):
         return _single_tts(
@@ -1159,12 +1186,14 @@ def _stream_edge_tts_sync_with_timeout(
     communicate, on_chunk, timeout_seconds: float
 ) -> None:
     """
-    带总超时地消费 edge_tts 7.x 的同步流。
+    带分块空闲超时地消费 edge_tts 7.x 的同步流。
 
     实现原因：
-    `stream_sync()` 本身是阻塞迭代器，网络层卡住时主线程无法及时恢复。
-    这里把阻塞迭代放到 daemon 线程中，主线程通过 Queue 获取 chunk，
-    到达超时时间后直接抛出 TimeoutError，让外层重试和错误日志继续工作。
+    `stream_sync()` 本身是阻塞迭代器，网络层卡住或首包无响应时主线程无法及时恢复。
+    这里把阻塞迭代放到 daemon 线程中，主线程通过 Queue 获取 chunk。每成功获取到一个 chunk
+    便会刷新 deadline；若连续超过 `timeout_seconds` 秒未接收到任何 chunk（包括首包等待），
+    则直接抛出 TimeoutError，让外层重试和错误日志继续工作，同时允许长篇幅脚本只要流式持续传输
+    即可完整合成完毕。
 
     注意：
     daemon 线程只作为兜底保护使用，最多随 Azure TTS V1 的 3 次重试产生
@@ -1201,6 +1230,7 @@ def _stream_edge_tts_sync_with_timeout(
             continue
 
         if item_type == "chunk":
+            deadline = time.monotonic() + timeout_seconds
             on_chunk(payload)
         elif item_type == "error":
             raise payload
@@ -1221,7 +1251,7 @@ def stream_edge_tts_chunks(
     Args:
         communicate: edge_tts.Communicate 实例
         on_chunk: 每拿到一个事件块时执行的回调
-        timeout_seconds: 单次流式请求总超时；为 None 时不启用超时。
+        timeout_seconds: 单次分块空闲超时（秒）；为 None 时不启用超时。
     """
     if hasattr(communicate, "stream_sync"):
         if timeout_seconds:
@@ -1238,19 +1268,24 @@ def stream_edge_tts_chunks(
         raise AttributeError("edge_tts communicate object has no stream method")
 
     async def _consume_async_stream():
-        async for chunk in communicate.stream():
-            on_chunk(chunk)
+        async_iter = communicate.stream().__aiter__()
+        while True:
+            try:
+                if timeout_seconds:
+                    chunk = await asyncio.wait_for(
+                        async_iter.__anext__(), timeout=timeout_seconds
+                    )
+                else:
+                    chunk = await async_iter.__anext__()
+                on_chunk(chunk)
+            except StopAsyncIteration:
+                break
 
     # 这里显式创建独立事件循环，而不是复用外部上下文，目的是避免
     # 在同步调用栈里遇到“当前线程没有事件循环”或跨线程复用循环的问题。
     loop = asyncio.new_event_loop()
     try:
-        if timeout_seconds:
-            loop.run_until_complete(
-                asyncio.wait_for(_consume_async_stream(), timeout=timeout_seconds)
-            )
-        else:
-            loop.run_until_complete(_consume_async_stream())
+        loop.run_until_complete(_consume_async_stream())
     finally:
         loop.close()
 
@@ -1259,6 +1294,9 @@ def azure_tts_v1(
     text: str, voice_name: str, voice_rate: float, voice_file: str
 ) -> Union[SubMaker, None]:
     voice_name = parse_voice_name(voice_name)
+    if not voice_name:
+        voice_name = get_default_voice_for_language()
+        logger.warning(f"voice_name was empty in azure_tts_v1, fallback to {voice_name}")
     text = text.strip()
     rate_str = convert_rate_to_percent(voice_rate)
     for i in range(3):

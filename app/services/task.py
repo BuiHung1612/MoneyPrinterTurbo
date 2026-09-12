@@ -316,11 +316,26 @@ def generate_terms(task_id, params, video_script):
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
         # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
         # 无法改善“后面内容的画面提前出现”的问题。
+        if params.video_source == "openai_image":
+            words = video_script.split()
+            estimated_sec = max(20, int(len(words) / 3.0) if len(words) > 10 else int(len(video_script) / 12.0))
+            clip_dur = max(2, min(15, params.video_clip_duration or 5))
+            target_amount = max(5, min(25, int(math.ceil(estimated_sec / clip_dur))))
+        elif params.match_materials_to_script:
+            target_amount = 8
+        else:
+            target_amount = 5
+
+        term_kwargs = {}
+        if params.video_source == "openai_image":
+            term_kwargs["video_source"] = params.video_source
+
         video_terms = llm.generate_terms(
             video_subject=params.video_subject,
             video_script=utils.remove_pause_tags(video_script),
-            amount=8 if params.match_materials_to_script else 5,
-            match_script_order=params.match_materials_to_script,
+            amount=target_amount,
+            match_script_order=params.match_materials_to_script or params.video_source == "openai_image",
+            **term_kwargs,
         )
     else:
         if isinstance(video_terms, str):
@@ -384,6 +399,25 @@ def resolve_custom_audio_file(
     # regardless of whether they exist, so callers cannot probe the host filesystem.
     if str(task_dir_error) == "file does not exist":
         raise task_dir_error
+
+    # Allow reusing an audio artifact from any task directory (e.g. storage/tasks/<task_id>/...)
+    tasks_root = path.realpath(utils.task_dir())
+    cleaned = requested_file.replace("\\", "/").strip()
+    candidate = None
+    if cleaned.startswith("/tasks/"):
+        candidate = path.join(tasks_root, cleaned.removeprefix("/tasks/"))
+    elif cleaned.startswith("tasks/"):
+        candidate = path.join(tasks_root, cleaned.removeprefix("tasks/"))
+    elif "storage/tasks/" in cleaned:
+        candidate = path.join(tasks_root, cleaned.split("storage/tasks/", 1)[-1])
+    elif path.isabs(cleaned):
+        candidate = cleaned
+
+    if candidate:
+        try:
+            return file_security.resolve_path_within_directory(tasks_root, candidate)
+        except ValueError:
+            pass
 
     # HTTP requests and other untrusted callers must never turn a submitted path
     # into a server-side file read. WebUI uploads already live in the task directory;
@@ -526,9 +560,15 @@ def generate_audio(
 
         logger.info("no custom audio file provided, using TTS to generate audio.")
         audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
+        resolved_voice_name = voice.parse_voice_name(params.voice_name)
+        if not resolved_voice_name and not voice.is_no_voice(params.voice_name):
+            resolved_voice_name = voice.get_default_voice_for_language(params.video_language)
+            logger.info(
+                f"task_id: {task_id}, voice_name was empty, resolved to default voice: {resolved_voice_name} (language: {params.video_language})"
+            )
         sub_maker = voice.tts(
             text=video_script,
-            voice_name=voice.parse_voice_name(params.voice_name),
+            voice_name=resolved_voice_name,
             voice_rate=params.voice_rate,
             voice_file=audio_file,
         )
@@ -734,6 +774,7 @@ def get_video_materials(
                 audio_duration=audio_duration * params.video_count,
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=params.match_materials_to_script,
+                **({"custom_prompt_template": params.openai_image_prompt_template} if getattr(params, "openai_image_prompt_template", None) else {}),
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端
@@ -1401,12 +1442,9 @@ def _run_pipeline(
             config.snapshot_config_with_pending(config.app)
         )
     ):
-        return _mark_task_failed(
-            task_id,
-            "preflight",
-            "OpenAI image source requires openai_image_base_url and "
-            "openai_image_model in config.toml (openai_image_api_keys is "
-            "optional for local gateways that need no auth)",
+        logger.info(
+            "openai_image_base_url is not configured in config.toml; "
+            "StudioFlow will use built-in AI illustration generator fallback."
         )
 
     # 只有完整成片流程需要视频配乐供应商。尽早阻止缺少 Key 的完整任务，避免
@@ -1470,11 +1508,21 @@ def _run_pipeline(
         )
         return _mark_task_failed(task_id, "script", error)
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=10,
+        script=video_script,
+        step_detail="Script generated",
+    )
 
     if stop_at == "script":
         sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
+            task_id,
+            state=const.TASK_STATE_COMPLETE,
+            progress=100,
+            script=video_script,
+            step_detail="Script generation completed",
         )
         return {"script": video_script}
 
@@ -1493,11 +1541,23 @@ def _run_pipeline(
 
     if stop_at == "terms":
         sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
+            task_id,
+            state=const.TASK_STATE_COMPLETE,
+            progress=100,
+            script=video_script,
+            terms=video_terms,
+            step_detail="Terms generation completed",
         )
         return {"script": video_script, "terms": video_terms}
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=20,
+        script=video_script,
+        terms=video_terms,
+        step_detail="Search terms generated",
+    )
 
     # 3. Generate audio
     audio_file, audio_duration, sub_maker = generate_audio(
@@ -1514,14 +1574,27 @@ def _run_pipeline(
             "failed to prepare narration audio",
         )
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=30,
+        script=video_script,
+        terms=video_terms,
+        audio_file=audio_file,
+        audio_duration=audio_duration,
+        step_detail=f"Audio synthesized ({audio_duration}s)",
+    )
 
     if stop_at == "audio":
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
             progress=100,
+            script=video_script,
+            terms=video_terms,
             audio_file=audio_file,
+            audio_duration=audio_duration,
+            step_detail="Audio generation completed",
         )
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
@@ -1535,11 +1608,26 @@ def _run_pipeline(
             task_id,
             state=const.TASK_STATE_COMPLETE,
             progress=100,
+            script=video_script,
+            terms=video_terms,
+            audio_file=audio_file,
+            audio_duration=audio_duration,
             subtitle_path=subtitle_path,
+            step_detail="Subtitles alignment completed",
         )
         return {"subtitle_path": subtitle_path}
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=40,
+        script=video_script,
+        terms=video_terms,
+        audio_file=audio_file,
+        audio_duration=audio_duration,
+        subtitle_path=subtitle_path,
+        step_detail="Subtitles aligned",
+    )
 
     # 5. Get video materials
     downloaded_videos = get_video_materials(
@@ -1561,11 +1649,28 @@ def _run_pipeline(
             task_id,
             state=const.TASK_STATE_COMPLETE,
             progress=100,
+            script=video_script,
+            terms=video_terms,
+            audio_file=audio_file,
+            audio_duration=audio_duration,
+            subtitle_path=subtitle_path,
             materials=downloaded_videos,
+            step_detail="Materials collection completed",
         )
         return {"materials": downloaded_videos}
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=50,
+        script=video_script,
+        terms=video_terms,
+        audio_file=audio_file,
+        audio_duration=audio_duration,
+        subtitle_path=subtitle_path,
+        materials=downloaded_videos,
+        step_detail="Rendering final video and mixing audio...",
+    )
 
     # 仅完整视频生成流程才需要处理视频拼接模式；
     # 这样可以避免 /subtitle 和 /audio 这类请求访问不存在的字段。
@@ -1625,6 +1730,7 @@ def _run_pipeline(
         "cross_post_error": None,
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
         "warnings": generation_warnings or None,
+        "step_detail": "Completed",
     }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs

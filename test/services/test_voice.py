@@ -365,6 +365,56 @@ class TestVoiceService(unittest.TestCase):
         self.assertIsNone(sub_maker)
         self.assertLess(elapsed, 2)
 
+    def test_azure_tts_v1_streaming_longer_than_timeout_succeeds(self):
+        """
+        验证 Azure TTS V1 在流式传输总时长超过 timeout 时，只要分块持续到达（空闲时间未超时），
+        即可顺利完成合成，避免长篇短剧/小说旁白被提前截断。
+        """
+
+        class _ContinuousCommunicate:
+            def __init__(self, text, voice, rate="+0%", boundary=None):
+                self.text = text
+                self.voice = voice
+                self.rate = rate
+                self.boundary = boundary
+
+            def stream_sync(self):
+                # 产生 4 个分块，每块间隔 0.03 秒，总时长 ~0.12s
+                # timeout 设为 0.06s；旧实现会在 0.06s 强制超时抛错，新实现每块重置 deadline，应顺利完成
+                for i in range(4):
+                    time.sleep(0.03)
+                    yield {"type": "audio", "data": f"chunk-{i}".encode("utf-8")}
+                yield {"type": "WordBoundary", "offset": 0, "duration": 100, "text": "test"}
+
+        class _FakeSubMaker:
+            def __init__(self):
+                self.cues = []
+                self.events = []
+
+            def feed(self, chunk):
+                self.events.append(chunk)
+
+            def get_srt(self):
+                return "1\n00:00:00,000 --> 00:00:01,000\ntest\n"
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            vs.edge_tts, "Communicate", _ContinuousCommunicate
+        ), patch.object(vs.edge_tts, "SubMaker", _FakeSubMaker), patch.object(
+            vs.config,
+            "app",
+            dict(vs.config.app, edge_tts_timeout=0.06),
+        ):
+            voice_file = Path(tmp_dir) / "long-edge-tts.mp3"
+            sub_maker = vs.azure_tts_v1(
+                text="小说长文本旁白生成测试",
+                voice_name="vi-VN-HoaiMyNeural",
+                voice_file=str(voice_file),
+                voice_rate=1.0,
+            )
+            self.assertIsNotNone(sub_maker)
+            self.assertTrue(voice_file.exists())
+            self.assertEqual(voice_file.read_bytes(), b"chunk-0chunk-1chunk-2chunk-3")
+
     @unittest.skipUnless(
         RUN_INTEGRATION_TESTS,
         "MPT_RUN_INTEGRATION_TESTS not set",
@@ -2103,10 +2153,29 @@ class TestElevenLabsVoice(unittest.TestCase):
                 voice_rate=1.0,
                 voice_file="out.mp3",
             )
-            self.assertEqual(result, "dummy_submaker")
+    def test_get_default_voice_for_language(self):
+        with patch.object(vs.config, "ui", {"voice_name": ""}):
+            self.assertEqual(vs.get_default_voice_for_language("vi"), "vi-VN-HoaiMyNeural")
+            self.assertEqual(vs.get_default_voice_for_language("vi-VN"), "vi-VN-HoaiMyNeural")
+            self.assertEqual(vs.get_default_voice_for_language("en"), "en-US-JennyNeural")
+            self.assertEqual(vs.get_default_voice_for_language("en-US"), "en-US-JennyNeural")
+            self.assertEqual(vs.get_default_voice_for_language("zh"), "zh-CN-XiaoxiaoNeural")
+            self.assertEqual(vs.get_default_voice_for_language(""), "vi-VN-HoaiMyNeural")
+
+    def test_tts_empty_voice_fallback(self):
+        with patch.object(vs.config, "ui", {"voice_name": ""}), patch.object(
+            vs, "_single_tts", return_value="mock_submaker"
+        ) as mock_single:
+            result = vs.tts(
+                text="Test text",
+                voice_name="",
+                voice_rate=1.0,
+                voice_file="out.mp3",
+            )
+            self.assertEqual(result, "mock_submaker")
             mock_single.assert_called_once()
-            called_text = mock_single.call_args[1].get("text") or mock_single.call_args[0][0]
-            self.assertEqual(called_text, original_text)
+            called_voice = mock_single.call_args[1].get("voice_name")
+            self.assertEqual(called_voice, "vi-VN-HoaiMyNeural")
 
 
 if __name__ == "__main__":

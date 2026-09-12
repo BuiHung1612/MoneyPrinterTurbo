@@ -308,7 +308,7 @@ class TestLiteLLMProvider(unittest.TestCase):
             get_llm_provider("modelscope").default_model, "ZhipuAI/GLM-5.2"
         )
         self.assertEqual(
-            get_llm_provider("gemini").default_model, "gemini-3.1-pro-preview"
+            get_llm_provider("gemini").default_model, "gemini-3.6-flash"
         )
         openrouter = get_llm_provider("openrouter")
         self.assertEqual(openrouter.default_model, "minimax/minimax-m3:free")
@@ -438,7 +438,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         )
         self.assertEqual(
             gemini.resolve_model_name("gemini-pro"),
-            "gemini-3.1-pro-preview",
+            "gemini-3.6-flash",
         )
         self.assertEqual(
             cloudflare.resolve_model_name("anthropic/claude-sonnet-4-5"),
@@ -816,7 +816,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         )
         self.assertEqual(captured["model"], "gemini-test-model")
         self.assertEqual(captured["contents"], "Say hello")
-        self.assertEqual(captured["config"].max_output_tokens, 2048)
+        self.assertEqual(captured["config"].max_output_tokens, 8192)
         self.assertTrue(captured["closed"])
 
     def test_cloudflare_requires_account_id_before_request(self):
@@ -2288,6 +2288,25 @@ class TestRetryWarningBoundary(unittest.TestCase):
             llm._max_retries - 1,
             "Warning must not fire on the final attempt — no further retry will occur",
         )
+    def test_generate_terms_handles_trailing_commas(self):
+        """Trailing commas inside JSON array should parse cleanly without retrying."""
+        raw_response = '["rain on window", "neon street", "cyberpunk tech",]'
+        with patch.object(llm, "_generate_response", return_value=raw_response):
+            result = llm.generate_terms(
+                video_subject="test subject",
+                video_script="some script text",
+            )
+        self.assertEqual(result, ["rain on window", "neon street", "cyberpunk tech"])
+
+    def test_generate_terms_recovers_from_truncated_response(self):
+        """Truncated JSON array from LLM token limits should recover completed terms."""
+        raw_response = '[\n  "rain on window",\n  "neon street",\n  "incomplete term'
+        with patch.object(llm, "_generate_response", return_value=raw_response):
+            result = llm.generate_terms(
+                video_subject="test subject",
+                video_script="some script text",
+            )
+        self.assertEqual(result, ["rain on window", "neon street"])
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from app.services import (
     material_cache,
     metaso_minimax,
     ofox,
+    state as sm,
     task_artifacts,
     video,
     volcengine_seedance,
@@ -30,6 +31,14 @@ from app.utils import utils
 # Thread-safe counter for API key rotation
 _api_key_counter = 0
 _api_key_lock = threading.Lock()
+
+
+def _notify_task_progress(task_id: str, progress: int, detail: str) -> None:
+    if task_id:
+        try:
+            sm.state.update_task(task_id, progress=progress, step_detail=detail)
+        except Exception:
+            pass
 
 
 class _OpenAIImageDecodeError(ValueError):
@@ -1141,22 +1150,13 @@ def _openai_image_size(video_aspect: VideoAspect) -> str:
     return OPENAI_IMAGE_DEFAULT_SIZES.get(VideoAspect(video_aspect), "1024x1024")
 
 
-def _openai_image_prompt(search_term: str) -> str:
+def _openai_image_prompt(search_term: str, custom_template: str = "") -> str:
     """
     把脚本关键词包装成最终提示词。
-
-    可选配置 ``openai_image_prompt_template`` 支持 ``{term}`` 占位符，
-    用于统一附加风格修饰（如画质、构图、镜头语言），提升图文匹配度：
-
-    .. code-block:: toml
-
-        openai_image_prompt_template = "cinematic photo of {term}, photorealistic"
-
-    留空或不含占位符时退回关键词原文，行为与旧版本完全一致。占位符
-    替换失败（如模板误写了格式化语法）也回退原文，不让配置错误中断
-    整个生成任务。
+    优先使用传入的 custom_template，其次读取配置 openai_image_prompt_template。
+    未配置模板时返回关键词原文。
     """
-    template = str(config.app.get("openai_image_prompt_template", "") or "").strip()
+    template = (custom_template or str(config.app.get("openai_image_prompt_template", "") or "")).strip()
     if not template or "{term}" not in template:
         return search_term
     try:
@@ -1250,6 +1250,11 @@ def _parse_openai_image_response(
     解析失败属于明确的业务拒绝（如内容策略）或异常响应格式，直接返回
     错误描述，不做退避重试——重发同样的请求只会得到同样的结果。
     """
+    content_type = getattr(response, "headers", {}).get("content-type", "")
+    content = getattr(response, "content", b"")
+    if "image/" in content_type or (len(content) > 16 and content.startswith((b"\xff\xd8\xff", b"\x89PNG"))):
+        return content, ""
+
     body = _response_json_safely(response)
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, list) or not data:
@@ -1403,35 +1408,86 @@ def _save_openai_image_file(
     return image_path, width, height
 
 
+def _request_pollinations_direct(
+    prompt: str,
+    aspect: VideoAspect,
+    custom_template: str = "",
+) -> tuple[bytes | None, str]:
+    import random
+    import urllib.parse
+    cleaned_prompt = _openai_image_prompt(prompt, custom_template)
+    if cleaned_prompt == prompt:
+        cleaned_prompt = (
+            f"2D Japanese anime illustration, anime visual novel style, cel shading, "
+            f"vibrant colors, clean linework, detailed anime background, masterpiece, 8k: {prompt}"
+        )
+    width, height = (1080, 1920) if aspect == VideoAspect.portrait else (1920, 1080)
+    encoded = urllib.parse.quote(cleaned_prompt)
+    seed = random.randint(1000, 999999)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&model=flux&seed={seed}&nologo=true&nofeed=true&safe=true"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+    failure_detail = "no response"
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, headers=headers, proxies=config.proxy, verify=_get_tls_verify(), timeout=45)
+            if resp.status_code == 200 and resp.content:
+                return resp.content, ""
+            failure_detail = f"HTTP {resp.status_code}"
+            if resp.status_code == 429:
+                wait_time = 3 * attempt
+                logger.warning(
+                    f"Pollinations AI rate limit HTTP 429: waiting {wait_time}s before retry (attempt {attempt}/3)..."
+                )
+                time.sleep(wait_time)
+                # On attempt 2, switch model to turbo to bypass flux-specific throttle
+                if attempt == 2:
+                    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&model=turbo&seed={seed}&nologo=true&nofeed=true&safe=true"
+                continue
+        except Exception as e:
+            failure_detail = str(e)
+        if attempt < 3:
+            time.sleep(2)
+    return None, failure_detail
+
+
 def generate_images_openai(
     search_term: str,
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
     save_dir: str = "",
+    custom_prompt_template: str = "",
 ) -> List[MaterialInfo]:
     """
     用 OpenAI 兼容文生图接口为一个脚本关键词生成一张图片并保存到本地。
-
-    与 generate_videos_wavespeed 保持同一签名和空列表失败约定。图片没有
-    原生时长，``duration`` 记录目标片段时长（秒），供按需下载流程核算
-    是否已经凑够配音时长。API 返回的实际尺寸可能与请求不一致，这里以
-    图片真实尺寸写入 rendition，不依赖请求参数。
     """
     aspect = VideoAspect(video_aspect)
     clip_duration = max(int(minimum_duration), 1)
-    endpoint, model = _openai_image_endpoint()
+
+    endpoint, model_name = _openai_image_endpoint()
     image_size = _openai_image_size(aspect)
-    payload = {
-        "model": model,
-        "prompt": _openai_image_prompt(search_term),
-        "n": 1,
-        "size": image_size,
-    }
-    logger.info(
-        f"generating image via openai-compatible endpoint: model={model}, "
-        f"term={search_term!r}, size={image_size}"
-    )
-    image_bytes, failure_detail = _request_openai_image(endpoint, payload)
+
+    if "pollinations" in endpoint.lower():
+        logger.info(
+            f"generating image via Pollinations AI: "
+            f"term={search_term!r}, aspect={aspect}"
+        )
+        image_bytes, failure_detail = _request_pollinations_direct(
+            search_term, aspect, custom_template=custom_prompt_template
+        )
+    else:
+        payload = {
+            "model": model_name,
+            "prompt": _openai_image_prompt(search_term, custom_prompt_template),
+            "n": 1,
+            "size": image_size,
+        }
+        logger.info(
+            f"generating image via openai-compatible endpoint: model={model_name}, "
+            f"term={search_term!r}, size={image_size}"
+        )
+        image_bytes, failure_detail = _request_openai_image(endpoint, payload)
     if image_bytes is None:
         logger.error(
             f"openai image generation failed: term={search_term!r}, "
@@ -1490,6 +1546,7 @@ def _download_videos_openai_image_on_demand(
     audio_duration: float,
     max_clip_duration: int,
     material_directory: str,
+    custom_prompt_template: str = "",
 ) -> List[str]:
     """
     按脚本片段顺序逐张生成 OpenAI 兼容文生图素材，凑够所需总时长立即停止。
@@ -1521,13 +1578,19 @@ def _download_videos_openai_image_on_demand(
         _persist_material_sources(task_id, material_sources)
         return video_paths
 
-    for search_term in search_terms:
-        items = generate_images_openai(
-            search_term=search_term,
-            minimum_duration=max_clip_duration,
-            video_aspect=video_aspect,
-            save_dir=material_directory,
-        )
+    for idx, search_term in enumerate(search_terms):
+        if idx > 0:
+            # 增加请求间隔防抖，避免高频请求触发免费服务 429 限流
+            time.sleep(2.0)
+        gen_kwargs = {
+            "search_term": search_term,
+            "minimum_duration": max_clip_duration,
+            "video_aspect": video_aspect,
+            "save_dir": material_directory,
+        }
+        if custom_prompt_template:
+            gen_kwargs["custom_prompt_template"] = custom_prompt_template
+        items = generate_images_openai(**gen_kwargs)
         for item in items:
             video_file = _render_openai_image_video(item.url, max_clip_duration)
             if not video_file:
@@ -1664,6 +1727,7 @@ def download_videos(
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
     match_script_order: bool = False,
+    custom_prompt_template: str = "",
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1752,6 +1816,7 @@ def download_videos(
             audio_duration=audio_duration,
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
+            custom_prompt_template=custom_prompt_template,
         )
 
     if match_script_order:
@@ -1768,7 +1833,12 @@ def download_videos(
     valid_video_items = []
     valid_video_urls = []
     found_duration = 0.0
-    for search_term in search_terms:
+    for s_idx, search_term in enumerate(search_terms, 1):
+        _notify_task_progress(
+            task_id,
+            40,
+            f"Searching visuals ({s_idx}/{len(search_terms)}): '{search_term}'",
+        )
         video_items = search_videos(
             search_term=search_term,
             minimum_duration=max_clip_duration,
@@ -1796,6 +1866,13 @@ def download_videos(
     for item in valid_video_items:
         try:
             source_info = item.source_info if isinstance(item.source_info, dict) else {}
+            provider_label = item.provider or "clip"
+            prog = 40 + int(10 * min(0.95, total_duration / max(1.0, audio_duration)))
+            _notify_task_progress(
+                task_id,
+                prog,
+                f"Downloading {provider_label} clip {len(video_paths) + 1}/{len(valid_video_items)} ({int(total_duration)}s/{int(audio_duration)}s)",
+            )
             logger.info(
                 f"downloading {item.provider} video: "
                 f"asset_id={source_info.get('asset_id') or 'unknown'}"
@@ -1832,6 +1909,11 @@ def download_videos(
                 f"detail={_redact_request_error(e, item.url)}"
             )
     logger.success(f"downloaded {len(video_paths)} videos")
+    _notify_task_progress(
+        task_id,
+        50,
+        f"Collected {len(video_paths)} visual clips ({int(total_duration)}s)",
+    )
     _persist_material_sources(task_id, material_sources)
     return video_paths
 

@@ -70,6 +70,8 @@ class TestTaskStaticFiles(unittest.TestCase):
 
     def test_unconfigured_cors_rejects_task_file_preflight(self):
         """默认同源模式必须拒绝第三方网页对任务文件发起预检。"""
+        if asgi.cors_allowed_origins:
+            self.skipTest("CORS_ALLOWED_ORIGINS is configured in the local environment")
 
         config.app["api_key"] = "task-file-secret"
 

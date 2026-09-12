@@ -41,11 +41,16 @@ def generate_video_script(request: Request, body: VideoScriptRequest):
     summary="Generate video terms based on the video script",
 )
 def generate_video_terms(request: Request, body: VideoTermsRequest):
+    kwargs = {}
+    if getattr(body, "video_source", None) and body.video_source != "pexels":
+        kwargs["video_source"] = body.video_source
+
     video_terms = llm.generate_terms(
         video_subject=body.video_subject,
         video_script=body.video_script,
         amount=body.amount,
         match_script_order=body.match_materials_to_script,
+        **kwargs,
     )
     response = {"video_terms": video_terms}
     return utils.get_response(200, response)

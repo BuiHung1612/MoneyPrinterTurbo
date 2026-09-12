@@ -1,6 +1,7 @@
 import glob
 import os
 import pathlib
+import re
 import shutil
 from typing import Union
 
@@ -105,17 +106,28 @@ def _public_task_data(task: dict) -> dict:
 
 
 def _task_file_to_uri(file: str, endpoint: str, task_dir: str, request_id: str) -> str:
-    if not isinstance(file, str):
+    if not isinstance(file, str) or not file.strip():
         return file
 
     if file.startswith(("http://", "https://")):
         return file
 
+    cleaned = file.replace("\\", "/").strip()
+    if cleaned.startswith("/tasks/") or cleaned.startswith("tasks/"):
+        uri_path = cleaned.lstrip("/")
+        if endpoint:
+            return f"{endpoint.rstrip('/')}/{uri_path}"
+        return f"/{uri_path}"
+
     try:
         resolved_path = file_security.resolve_path_within_directory(task_dir, file)
     except ValueError as exc:
-        # 任务状态理论上只应保存任务目录内的产物路径。这里不再继续拼接 URL，
-        # 避免把异常路径包装成可访问链接；同时保留原值，便于排查历史脏数据。
+        match = re.search(r"(?:storage/)?tasks/([a-zA-Z0-9_-]+/[^?#]+)$", cleaned)
+        if match:
+            uri_path = f"tasks/{match.group(1)}"
+            if endpoint:
+                return f"{endpoint.rstrip('/')}/{uri_path}"
+            return f"/{uri_path}"
         logger.warning(
             f"skip unsafe task output path, request_id: {request_id}, path: {file}, "
             f"error: {str(exc)}"
@@ -127,6 +139,31 @@ def _task_file_to_uri(file: str, endpoint: str, task_dir: str, request_id: str) 
     if endpoint:
         return f"{endpoint.rstrip('/')}/{uri_path}"
     return f"/{uri_path}"
+
+
+def _format_task_response(
+    task: dict, endpoint: str, task_dir: str, request_id: str
+) -> dict:
+    response_task = _public_task_data(task)
+    if "videos" in task and isinstance(task["videos"], list):
+        response_task["videos"] = [
+            _task_file_to_uri(v, endpoint, task_dir, request_id)
+            for v in task["videos"]
+        ]
+    if "combined_videos" in task and isinstance(task["combined_videos"], list):
+        response_task["combined_videos"] = [
+            _task_file_to_uri(v, endpoint, task_dir, request_id)
+            for v in task["combined_videos"]
+        ]
+    if "audio_file" in task and task["audio_file"]:
+        response_task["audio_file"] = _task_file_to_uri(
+            task["audio_file"], endpoint, task_dir, request_id
+        )
+    if "subtitle_path" in task and task["subtitle_path"]:
+        response_task["subtitle_path"] = _task_file_to_uri(
+            task["subtitle_path"], endpoint, task_dir, request_id
+        )
+    return response_task
 
 
 def _parse_byte_range(
@@ -243,10 +280,16 @@ def get_all_tasks(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1),
 ):
+    request_id = base.get_task_id(request)
+    endpoint = config.app.get("endpoint", "").rstrip("/")
+    task_dir = utils.task_dir()
     tasks, total = sm.state.get_all_tasks(page, page_size)
 
     response = {
-        "tasks": [_public_task_data(task) for task in tasks],
+        "tasks": [
+            _format_task_response(task, endpoint, task_dir, request_id)
+            for task in tasks
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -268,18 +311,7 @@ def get_task(
     task = sm.state.get_task(task_id)
     if task:
         task_dir = utils.task_dir()
-        response_task = _public_task_data(task)
-
-        if "videos" in task:
-            response_task["videos"] = [
-                _task_file_to_uri(v, endpoint, task_dir, request_id)
-                for v in task["videos"]
-            ]
-        if "combined_videos" in task:
-            response_task["combined_videos"] = [
-                _task_file_to_uri(v, endpoint, task_dir, request_id)
-                for v in task["combined_videos"]
-            ]
+        response_task = _format_task_response(task, endpoint, task_dir, request_id)
         return utils.get_response(200, response_task)
 
     raise HttpException(
