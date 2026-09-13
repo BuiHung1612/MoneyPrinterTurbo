@@ -1,3 +1,4 @@
+import asyncio
 import glob
 import os
 import pathlib
@@ -5,7 +6,7 @@ import re
 import shutil
 from typing import Union
 
-from fastapi import BackgroundTasks, Depends, Path, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, Path, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.params import File
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
@@ -295,6 +296,36 @@ def get_all_tasks(
         "page_size": page_size,
     }
     return utils.get_response(200, response)
+
+
+@router.websocket("/tasks/ws")
+async def websocket_tasks_stream(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        endpoint = config.app.get("endpoint", "").rstrip("/")
+        task_dir = utils.task_dir()
+        last_str = ""
+        while True:
+            tasks, total = sm.state.get_all_tasks(1, 50)
+            formatted = [
+                _format_task_response(t, endpoint, task_dir, "ws")
+                for t in tasks
+            ]
+            current_str = utils.to_json(formatted)
+            if current_str != last_str:
+                last_str = current_str
+                await websocket.send_json({
+                    "event": "tasks_update",
+                    "tasks": formatted,
+                    "total": total,
+                })
+            else:
+                await websocket.send_json({"event": "ping"})
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Task websocket closed: {e}")
 
 
 

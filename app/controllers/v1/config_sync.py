@@ -23,6 +23,13 @@ class ConfigSyncRequest(BaseModel):
     anthropic_model_name: Optional[str] = None
     pexels_api_keys: Optional[Union[List[str], str]] = None
     pixabay_api_keys: Optional[Union[List[str], str]] = None
+    # Video & Image providers
+    metaso_minimax_api_key: Optional[str] = None
+    ofox_api_key: Optional[str] = None
+    volcengine_seedance_api_key: Optional[str] = None
+    openai_image_api_keys: Optional[Union[List[str], str]] = None
+    openai_image_base_url: Optional[str] = None
+    openai_image_model: Optional[str] = None
 
 
 @router.get("/config/sync", summary="Get status of configured engine providers and keys")
@@ -37,6 +44,10 @@ def get_config_sync_status(request: Request):
             "has_anthropic_key": bool(config.app.get("anthropic_api_key", "").strip()),
             "has_pexels_key": bool(config.app.get("pexels_api_keys")),
             "has_pixabay_key": bool(config.app.get("pixabay_api_keys")),
+            "has_minimax_key": bool(config.app.get("metaso_minimax_api_key", "").strip()),
+            "has_ofox_key": bool(config.app.get("ofox_api_key", "").strip()),
+            "has_volcengine_seedance_key": bool(config.app.get("volcengine_seedance_api_key", "").strip()),
+            "has_openai_image_key": bool(config.app.get("openai_image_api_keys")),
         },
         "ok",
     )
@@ -97,6 +108,32 @@ def sync_engine_config(req: ConfigSyncRequest, request: Request):
             keys = [k.strip() for k in req.pixabay_api_keys if k and k.strip()]
         config.app["pixabay_api_keys"] = keys
         updated["pixabay_api_keys"] = len(keys)
+
+    if req.metaso_minimax_api_key is not None:
+        config.app["metaso_minimax_api_key"] = req.metaso_minimax_api_key.strip()
+        updated["metaso_minimax_api_key"] = bool(config.app["metaso_minimax_api_key"])
+
+    if req.ofox_api_key is not None:
+        config.app["ofox_api_key"] = req.ofox_api_key.strip()
+        updated["ofox_api_key"] = bool(config.app["ofox_api_key"])
+
+    if req.volcengine_seedance_api_key is not None:
+        config.app["volcengine_seedance_api_key"] = req.volcengine_seedance_api_key.strip()
+        updated["volcengine_seedance_api_key"] = bool(config.app["volcengine_seedance_api_key"])
+
+    if req.openai_image_base_url is not None:
+        config.app["openai_image_base_url"] = req.openai_image_base_url.strip()
+
+    if req.openai_image_model is not None:
+        config.app["openai_image_model"] = req.openai_image_model.strip()
+
+    if req.openai_image_api_keys is not None:
+        if isinstance(req.openai_image_api_keys, str):
+            keys = [k.strip() for k in req.openai_image_api_keys.split(",") if k.strip()]
+        else:
+            keys = [k.strip() for k in req.openai_image_api_keys if k and k.strip()]
+        config.app["openai_image_api_keys"] = keys
+        updated["openai_image_api_keys"] = len(keys)
 
     try:
         config.save_config()
