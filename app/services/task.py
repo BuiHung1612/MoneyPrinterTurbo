@@ -775,6 +775,8 @@ def get_video_materials(
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=params.match_materials_to_script,
                 **({"custom_prompt_template": params.openai_image_prompt_template} if getattr(params, "openai_image_prompt_template", None) else {}),
+                html_motion_template=getattr(params, "html_motion_template", None),
+                html_motion_code=getattr(params, "html_motion_code", None),
             )
         except volcengine_seedance.VolcEngineSeedanceError as exc:
             # 未确认状态和已生成但下载失败都对应一个可在方舟控制台恢复的远端

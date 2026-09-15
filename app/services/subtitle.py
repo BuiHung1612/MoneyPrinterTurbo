@@ -301,6 +301,63 @@ def correct(subtitle_file, video_script):
         logger.success("Subtitle is correct")
 
 
+def transcribe_media(media_file: str, language: str = "") -> dict:
+    global model
+    if WhisperModel is None:
+        raise RuntimeError("faster_whisper is not installed or available")
+
+    current_model = model
+    if not current_model:
+        chosen_size = config.whisper.get("model_size", "tiny") or "tiny"
+        model_path = f"{utils.root_dir()}/models/whisper-{chosen_size}"
+        model_bin_file = f"{model_path}/model.bin"
+        if not os.path.isdir(model_path) or not os.path.isfile(model_bin_file):
+            model_path = chosen_size
+
+        try:
+            logger.info(f"Loading Whisper model for transcription: {model_path}")
+            current_model = WhisperModel(
+                model_size_or_path=model_path, device=device, compute_type=compute_type
+            )
+            model = current_model
+        except Exception as exc:
+            logger.warning(
+                f"Failed to load Whisper model '{model_path}': {exc}. Falling back to 'tiny'..."
+            )
+            current_model = WhisperModel(
+                model_size_or_path="tiny", device=device, compute_type=compute_type
+            )
+            model = current_model
+
+    kwargs = {
+        "beam_size": 5,
+        "vad_filter": True,
+        "vad_parameters": dict(min_silence_duration_ms=500),
+    }
+    if language:
+        kwargs["language"] = language
+
+    logger.info(f"Transcribing media audio: {media_file}, lang={language or 'auto'}")
+    segments, info = current_model.transcribe(media_file, **kwargs)
+
+    text_segments = []
+    for segment in segments:
+        seg_text = segment.text.strip()
+        if seg_text:
+            text_segments.append(seg_text)
+
+    full_text = " ".join(text_segments)
+    detected_lang = getattr(info, "language", language)
+    logger.info(
+        f"Transcription complete: {len(text_segments)} segments, detected_lang={detected_lang}"
+    )
+    return {
+        "text": full_text,
+        "language": detected_lang,
+        "segments": text_segments,
+    }
+
+
 if __name__ == "__main__":
     task_id = "c12fd1e6-4b0a-4d65-a075-c87abe35a072"
     task_dir = utils.task_dir(task_id)

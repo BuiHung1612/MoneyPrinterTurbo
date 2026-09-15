@@ -54,9 +54,17 @@ class VideoFitMode(str, Enum):
 
 
 SubtitleDisplayMode = Literal["sentence", "word_by_word"]
-SubtitleAnimation = Literal["none", "pop_spring"]
+SubtitleAnimation = Literal[
+    "none", "pop_spring", "hormozi_pop", "karaoke_gradient", "minimal_blur"
+]
 _SUBTITLE_DISPLAY_MODES = ("sentence", "word_by_word")
-_SUBTITLE_ANIMATIONS = ("none", "pop_spring")
+_SUBTITLE_ANIMATIONS = (
+    "none",
+    "pop_spring",
+    "hormozi_pop",
+    "karaoke_gradient",
+    "minimal_blur",
+)
 
 
 def _get_valid_ui_choice(key: str, allowed_values: tuple[str, ...], default: str) -> str:
@@ -131,6 +139,7 @@ class VideoParams(BaseModel):
     bgm_type: Optional[str] = "random"
     bgm_file: Optional[str] = ""
     bgm_volume: Optional[float] = 0.2
+    original_audio_volume: Optional[float] = 0.0
     # 视频配乐供应商共用提示词，WebUI 新任务统一写入该字段。保留下面的
     # Sonilo 专用字段以兼容旧任务记录和现有 CLI 参数。
     video_music_prompt: str = Field(default="", max_length=2000)
@@ -160,6 +169,8 @@ class VideoParams(BaseModel):
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
     openai_image_prompt_template: Optional[str] = None
+    html_motion_template: Optional[str] = None
+    html_motion_code: Optional[str] = None
 
 
 class SubtitleRequest(BaseModel):
@@ -272,6 +283,11 @@ class VideoTermsRequest(VideoTermsParams, BaseModel):
 
 class VideoSocialMetadataRequest(VideoSocialMetadataParams, BaseModel):
     pass
+
+
+class TranscribeRequest(BaseModel):
+    material_name: Optional[str] = ""
+    language: Optional[str] = ""
 
 
 # ---------------------------

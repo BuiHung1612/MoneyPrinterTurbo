@@ -29,12 +29,14 @@ from app.models.schema import (
     TaskQueryResponse,
     TaskResponse,
     TaskVideoRequest,
+    TranscribeRequest,
     VideoMaterialUploadResponse,
-    VideoMaterialRetrieveResponse
+    VideoMaterialRetrieveResponse,
 )
 from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
 from app.services import state as sm
+from app.services import subtitle as subtitle_service
 from app.services import task as tm
 from app.utils import file_security, utils
 
@@ -516,6 +518,58 @@ def upload_video_material_file(request: Request, file: UploadFile = File(...)):
 
     response = {"file": stored_filename}
     return utils.get_response(200, response)
+
+
+@router.post(
+    "/transcribe",
+    summary="Transcribe audio or video content into text script",
+)
+def transcribe_media_audio(
+    request: Request,
+    body: TranscribeRequest,
+):
+    request_id = base.get_task_id(request)
+    material_name = (body.material_name or "").strip()
+    if not material_name:
+        raise HttpException(
+            task_id=request_id,
+            status_code=400,
+            message=f"{request_id}: material_name is required",
+        )
+
+    # Sanitize and resolve file path
+    safe_name = os.path.basename(material_name)
+    local_videos_dir = utils.storage_dir("local_videos", create=True)
+    target_path = os.path.join(local_videos_dir, safe_name)
+
+    if not os.path.isfile(target_path):
+        # Fallback to tasks_dir or storage/materials
+        tasks_dir = utils.task_dir()
+        alt_path = os.path.join(tasks_dir, material_name)
+        materials_dir = utils.storage_dir("materials", create=True)
+        mat_path = os.path.join(materials_dir, safe_name)
+        if os.path.isfile(alt_path):
+            target_path = alt_path
+        elif os.path.isfile(mat_path):
+            target_path = mat_path
+        else:
+            raise HttpException(
+                task_id=request_id,
+                status_code=404,
+                message=f"{request_id}: Media material '{safe_name}' not found on server",
+            )
+
+    try:
+        result = subtitle_service.transcribe_media(target_path, language=body.language or "")
+        return utils.get_response(200, result)
+    except Exception as exc:
+        logger.exception(f"Audio transcription error: {exc}")
+        raise HttpException(
+            task_id=request_id,
+            status_code=500,
+            message=f"{request_id}: Transcription failed - {str(exc)}",
+        )
+
 
 @router.get("/stream/{file_path:path}")
 async def stream_video(request: Request, file_path: str):

@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 from urllib.parse import quote_plus, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -1728,6 +1728,8 @@ def download_videos(
     max_clip_duration: int = 5,
     match_script_order: bool = False,
     custom_prompt_template: str = "",
+    html_motion_template: Optional[str] = None,
+    html_motion_code: Optional[str] = None,
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -1817,6 +1819,17 @@ def download_videos(
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
             custom_prompt_template=custom_prompt_template,
+        )
+    if source == "html_animation":
+        from app.services import html_motion
+        return html_motion.generate_html_motion_videos(
+            task_id=task_id,
+            search_terms=search_terms,
+            video_aspect=video_aspect,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+            html_motion_template=html_motion_template,
+            html_motion_code=html_motion_code,
         )
 
     if match_script_order:

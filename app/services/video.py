@@ -1200,8 +1200,25 @@ def generate_video(
     font_path = ""
     if params.subtitle_enabled:
         if not params.font_name:
-            params.font_name = "STHeitiMedium.ttc"
+            if params.video_language == "vi":
+                params.font_name = "BeVietnamPro-Bold.ttf"
+            else:
+                params.font_name = "STHeitiMedium.ttc"
+        elif params.video_language == "vi" and params.font_name in [
+            "STHeitiMedium.ttc",
+            "STHeitiLight.ttc",
+            "UTM Kabel KT.ttf",
+            "MicrosoftYaHeiBold.ttc",
+        ]:
+            # Replace Asian/legacy fonts that lack Vietnamese UTF-8 accents with BeVietnamPro
+            params.font_name = "BeVietnamPro-Bold.ttf"
+
         font_path = os.path.join(utils.font_dir(), params.font_name)
+        if not os.path.exists(font_path) and params.video_language == "vi":
+            fallback_vn = os.path.join(utils.font_dir(), "BeVietnamPro-Bold.ttf")
+            if os.path.exists(fallback_vn):
+                font_path = fallback_vn
+
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
 
@@ -1360,7 +1377,14 @@ def generate_video(
 
         # 弹跳动画只在用户显式选择时启用；默认 none 完全沿用原字幕渲染路径。
         anim_type = getattr(params, "subtitle_animation", "none")
-        if anim_type in ("pop_spring", "spring", "pop"):
+        if anim_type in (
+            "pop_spring",
+            "spring",
+            "pop",
+            "hormozi_pop",
+            "karaoke_gradient",
+            "minimal_blur",
+        ):
             _clip = _apply_subtitle_spring_animation(_clip, duration)
 
         if params.subtitle_position == "bottom":
@@ -1466,6 +1490,21 @@ def generate_video(
                     f"failed to mix background music: type={params.bgm_type}, "
                     f"file={bgm_file}"
                 )
+
+        if (
+            getattr(params, "original_audio_volume", 0)
+            and params.original_audio_volume > 0
+            and video_clip.audio is not None
+        ):
+            try:
+                orig_effects = [afx.MultiplyVolume(params.original_audio_volume)]
+                orig_clip = video_clip.audio.with_effects(orig_effects)
+                audio_clip = CompositeAudioClip([audio_clip, orig_clip])
+                logger.info(
+                    f"mixed original video audio with volume: {params.original_audio_volume}"
+                )
+            except Exception as exc:
+                logger.warning(f"failed to mix original video audio: {exc}")
 
         final_video_clip = video_clip.with_audio(audio_clip)
         clip_stack.callback(final_video_clip.close)
